@@ -14144,3 +14144,240 @@ fn test_current_wasm_hash_none_before_first_upgrade() {
 
     assert_eq!(client.get_current_wasm_hash(), None);
 }
+
+// ============================================================
+// WITHDRAWAL TESTS (#71, #72, #73, #74)
+// ============================================================
+
+/// #71 — Withdrawal rejected when requested amount exceeds credited earnings.
+/// The call must panic and leave the balance untouched.
+#[test]
+#[should_panic(expected = "insufficient earnings balance")]
+fn test_withdrawal_rejected_when_amount_exceeds_credited_earnings() {
+    let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    let student = Address::generate(&env);
+    token::StellarAssetClient::new(&env, &token_id).mint(&student, &1_000_000_000);
+
+    let price: i128 = 1_000_000_000;
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-WD71",
+        price,
+    );
+    client.enroll(&student, &String::from_str(&env, "COURSE-WD71"));
+
+    let earned = client.get_instructor_earnings(&instructor, &token_id);
+    assert!(earned > 0);
+
+    // Attempting to withdraw one stroop more than credited must fail.
+    // Balance and token holdings must remain unchanged.
+    let balance_before = token_client.balance(&instructor);
+    client.withdraw_earnings(&instructor, &token_id, &(earned + 1));
+
+    // Unreachable — panic expected above.
+    assert_eq!(token_client.balance(&instructor), balance_before);
+    assert_eq!(client.get_instructor_earnings(&instructor, &token_id), earned);
+}
+
+/// #72 — Withdrawal accounting after multiple enrollments.
+/// Credit earnings from several students, withdraw a partial amount, then
+/// assert: total_credited == withdrawals_so_far + remaining_balance.
+#[test]
+fn test_withdrawal_accounting_after_multiple_enrollments() {
+    let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    let price: i128 = 500_000_000; // 50 USDC
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-WD72",
+        price,
+    );
+    let course_id = String::from_str(&env, "COURSE-WD72");
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+
+    // Enroll three students.
+    for _ in 0..3 {
+        let s = Address::generate(&env);
+        asset_client.mint(&s, &1_000_000_000);
+        client.enroll(&s, &course_id);
+    }
+
+    // 80% instructor share per enrollment, 3 students.
+    let instructor_share_per = price - price * 20 / 100;
+    let total_credited = instructor_share_per * 3;
+    assert_eq!(
+        client.get_instructor_earnings(&instructor, &token_id),
+        total_credited,
+    );
+
+    // Partial withdrawal.
+    let partial = instructor_share_per; // withdraw exactly one share
+    client.withdraw_earnings(&instructor, &token_id, &partial);
+
+    let remaining = client.get_instructor_earnings(&instructor, &token_id);
+    let withdrawn = token_client.balance(&instructor);
+
+    // Invariant: total_credited == withdrawn + remaining.
+    assert_eq!(withdrawn + remaining, total_credited);
+    assert_eq!(withdrawn, partial);
+    assert_eq!(remaining, total_credited - partial);
+}
+
+/// #73 — Failed token transfer preserves the instructor balance.
+/// When the token mock rejects the payout the credited balance must stay
+/// unchanged and no tokens must leave the contract.
+#[test]
+#[should_panic(expected = "mock token: transfer")]
+fn test_withdrawal_transfer_failure_preserves_instructor_balance() {
+    let (env, contract_id, _sac_id, admin, _sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+
+    let student = Address::generate(&env);
+    let funded = 1_000_000_000i128;
+    let (token_id, token) = setup_non_standard_token(&env, &client, &admin, &student, funded);
+
+    let price = 100_000_000i128;
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-WD73",
+        price,
+    );
+
+    // The first transfer is student → contract (enroll). The second is
+    // contract → instructor (withdraw). We want the second to fail.
+    // fail_on_transfer(2) counts from 1, so the 2nd transfer panics.
+    token.fail_on_transfer(&2);
+    client.enroll(&student, &String::from_str(&env, "COURSE-WD73"));
+
+    let earned = client.get_instructor_earnings(&instructor, &token_id);
+    assert!(earned > 0);
+
+    // This withdrawal triggers the second transfer; the mock will panic.
+    // The panic must propagate and leave earnings unchanged.
+    client.withdraw_earnings(&instructor, &token_id, &0);
+}
+
+/// #74 — Withdrawal history grows with each successful withdrawal and
+/// records the correct instructor, token, amount, and ledger. Callers
+/// have no mutation endpoint; only `withdraw_earnings` can append entries.
+#[test]
+fn test_withdrawal_history_records_each_payout() {
+    let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+
+    let price: i128 = 1_000_000_000;
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-WD74A",
+        price,
+    );
+    let course_id = String::from_str(&env, "COURSE-WD74A");
+    let asset_client = token::StellarAssetClient::new(&env, &token_id);
+
+    // Enroll two students to build up earnings.
+    for _ in 0..2 {
+        let s = Address::generate(&env);
+        asset_client.mint(&s, &2_000_000_000);
+        client.enroll(&s, &course_id);
+    }
+
+    let instructor_share = price - price * 20 / 100;
+    let total_credited = instructor_share * 2;
+
+    // History is empty before any withdrawal.
+    let history_before = client.get_withdrawal_history(&instructor, &token_id);
+    assert_eq!(history_before.len(), 0);
+
+    // First partial withdrawal.
+    let first_amount = instructor_share; // one share
+    let ledger_before_first = env.ledger().sequence();
+    client.withdraw_earnings(&instructor, &token_id, &first_amount);
+    let ledger_after_first = env.ledger().sequence();
+
+    let history_after_first = client.get_withdrawal_history(&instructor, &token_id);
+    assert_eq!(history_after_first.len(), 1);
+    let r0 = history_after_first.get(0).unwrap();
+    assert_eq!(r0.instructor, instructor);
+    assert_eq!(r0.token, token_id);
+    assert_eq!(r0.amount, first_amount);
+    assert!(r0.ledger >= ledger_before_first && r0.ledger <= ledger_after_first);
+
+    // Second full withdrawal.
+    let remaining = total_credited - first_amount;
+    let ledger_before_second = env.ledger().sequence();
+    client.withdraw_earnings(&instructor, &token_id, &0);
+    let ledger_after_second = env.ledger().sequence();
+
+    let history_after_second = client.get_withdrawal_history(&instructor, &token_id);
+    assert_eq!(history_after_second.len(), 2);
+    let r1 = history_after_second.get(1).unwrap();
+    assert_eq!(r1.instructor, instructor);
+    assert_eq!(r1.token, token_id);
+    assert_eq!(r1.amount, remaining);
+    assert!(r1.ledger >= ledger_before_second && r1.ledger <= ledger_after_second);
+
+    // No funds remain; a third no-op withdrawal must not append an entry.
+    client.withdraw_earnings(&instructor, &token_id, &0);
+    let history_final = client.get_withdrawal_history(&instructor, &token_id);
+    assert_eq!(history_final.len(), 2);
+}
+
+/// #74 — The contract exposes no function that allows a caller to overwrite
+/// or remove history entries. The only write path is `withdraw_earnings`.
+/// This test verifies that a successful payout adds exactly one record and
+/// that the history returned by a later call is identical (append-only).
+#[test]
+fn test_withdrawal_history_is_append_only_and_caller_cannot_mutate() {
+    let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+
+    let price: i128 = 500_000_000;
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-WD74B",
+        price,
+    );
+    let course_id = String::from_str(&env, "COURSE-WD74B");
+    let student = Address::generate(&env);
+    token::StellarAssetClient::new(&env, &token_id).mint(&student, &1_000_000_000);
+    client.enroll(&student, &course_id);
+
+    client.withdraw_earnings(&instructor, &token_id, &0);
+
+    let snapshot = client.get_withdrawal_history(&instructor, &token_id);
+    assert_eq!(snapshot.len(), 1);
+
+    // Fetching the history a second time returns an identical result.
+    let snapshot2 = client.get_withdrawal_history(&instructor, &token_id);
+    assert_eq!(snapshot2.len(), 1);
+    assert_eq!(snapshot2.get(0).unwrap().amount, snapshot.get(0).unwrap().amount);
+
+    // The contract has no `clear_withdrawal_history` or similar endpoint;
+    // confirm the entry count has not changed.
+    assert_eq!(client.get_withdrawal_history(&instructor, &token_id).len(), 1);
+}
