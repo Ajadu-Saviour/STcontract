@@ -14183,6 +14183,7 @@ fn test_cancel_upgrade_requires_auth_from_both_admins() {
     assert!(client.get_pending_upgrade().is_some());
 }
 
+mod course_status;
 mod proptests;
 
 // ============================================================
