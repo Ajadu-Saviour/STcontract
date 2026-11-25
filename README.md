@@ -728,6 +728,18 @@ MIT
 <!-- handsoff-issue-97 -->
 - #97: Test arbitration escalation fee collection rollback
 
+<!-- handsoff-issue-98 -->
+- #98: Test arbitration timeout exactly at its configured ledger
+
+<!-- handsoff-issue-99 -->
+- #99: Test duplicate arbitration escalation for an open case
+
+<!-- handsoff-issue-100 -->
+- #100: Add a read-only arbitration case query for backend reconciliation
+
+<!-- handsoff-issue-101 -->
+- #101: Specify the subscription enrollment lifecycle
+
 <!-- handsoff-issue-106 -->
 - #106: Define subscription cancellation and refund behavior
 
