@@ -2417,6 +2417,21 @@ impl SorobanLardContract {
         student: Address,
         course_id: String,
         discount_bps: u32,
+        redemption_code: String,
+    ) {
+        student.require_auth();
+        if discount_bps > 5_000 {
+            panic!("discount exceeds maximum 5000 bps");
+        }
+        let course = Self::get_course_internal(&env, &course_id)
+            .unwrap_or_else(|| panic!("course not found"));
+        let discount_amount = course
+            .price
+            .checked_mul(discount
+        env: Env,
+        student: Address,
+        course_id: String,
+        discount_bps: u32,
     ) {
         student.require_auth();
         Self::enroll_internal_with_discount(
@@ -2424,6 +2439,9 @@ impl SorobanLardContract {
             &student,
             &course_id,
             Some(discount_bps),
+            redemption_code,
+        );
+    }
         );
     }
 
