@@ -727,3 +727,15 @@ MIT
 
 <!-- handsoff-issue-97 -->
 - #97: Test arbitration escalation fee collection rollback
+
+<!-- handsoff-issue-106 -->
+- #106: Define subscription cancellation and refund behavior
+
+<!-- handsoff-issue-107 -->
+- #107: Emit events for subscription lifecycle changes
+
+<!-- handsoff-issue-108 -->
+- #108: Test subscription payment failures leave no partial state
+
+<!-- handsoff-issue-109 -->
+- #109: Add storage migration coverage for subscription records
