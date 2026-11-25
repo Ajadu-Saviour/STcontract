@@ -297,7 +297,7 @@ Initialises the contract. Called once by the deployer, immediately after deploym
 | `mark_completed(admin, student, course_id, evidence_hash)` | Admin | Called after backend verifies all lessons done. A non-empty `evidence_hash` replaces the student co-signature. |
 | `issue_certificate(admin, student, course_id, cert_id, course_title, enrollment_reference, expires_at_ledger, instructor_signature)` | Admin | Issues on-chain certificate. Requires completion. `enrollment_reference` is a free-form backend ID (e.g. UUID). |
 | `revoke_certificate(admin, certificate_id, reason)` | Admin | Flags certificate as revoked |
-| `bulk_revoke_course_certificates(admin, course_id)` | Admin | Flags every certificate of a course as revoked in one transaction |
+| `bulk_revoke_course_certificates(admin, course_id)` | Admin | Flags every certificate of a course as revoked in one transaction. Index entries whose Certificate record has expired from storage are skipped so live certificates are never silently passed over. |
 | `bulk_revoke_certificates_paged(admin, course_id, cursor, limit)` | Admin | Paginated bulk revocation — processes a bounded slice of the certificate index per call. Returns `BulkRevokePage { revoked_count, processed, next_cursor }`. Repeat with the returned `next_cursor` until it is `None`. Safe to retry a page: `apply_revocation` is idempotent so already-revoked certificates are not double-counted. |
 
 ### Admin management
