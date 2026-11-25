@@ -716,6 +716,15 @@ MIT
 <!-- handsoff-issue-146 -->
 - #146: Add invariant tests for accounting and multi-sig safety
 
+<!-- handsoff-issue-91 -->
+- #91: Test waitlist promotion never exceeds course capacity
+
+<!-- handsoff-issue-92 -->
+- #92: Test waitlist promotion order is FIFO
+
+<!-- handsoff-issue-93 -->
+- #93: Test duplicate waitlist joins are idempotent or rejected
+
 <!-- handsoff-issue-94 -->
 - #94: Test waitlist admission for courses without a capacity limit
 
