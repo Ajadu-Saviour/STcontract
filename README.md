@@ -740,6 +740,18 @@ MIT
 <!-- handsoff-issue-101 -->
 - #101: Specify the subscription enrollment lifecycle
 
+<!-- handsoff-issue-102 -->
+- #102: Add persistent records for subscription enrollments
+
+<!-- handsoff-issue-103 -->
+- #103: Add an explicit paid subscription enrollment entrypoint
+
+<!-- handsoff-issue-104 -->
+- #104: Add explicit subscription renewal transactions
+
+<!-- handsoff-issue-105 -->
+- #105: Enforce subscription expiry in enrollment read queries
+
 <!-- handsoff-issue-106 -->
 - #106: Define subscription cancellation and refund behavior
 
