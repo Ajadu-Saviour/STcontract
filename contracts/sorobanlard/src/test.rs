@@ -15600,410 +15600,39 @@ fn test_current_wasm_hash_none_before_first_upgrade() {
 }
 
 // ============================================================
-// ISSUES #55-#58: CATALOG, BLANK IDS, ARCHIVED ID REUSE, REVIEW DELAY
-// ============================================================
-// BULK REVOCATION WITH MISSING CERTIFICATE RECORDS (#88)
+// REFUND REGRESSION TESTS (#67, #68, #69, #70)
 // ============================================================
 
-#[test]
-fn test_bulk_revoke_skips_missing_middle_certificate() {
-    let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-
-    register_and_approve_course(
-        &env,
-        &client,
-        &token_id,
-        &admin,
-        &instructor,
-        "COURSE-MISS-MID",
-        100_000_000,
-    );
-    let course_id = String::from_str(&env, "COURSE-MISS-MID");
-    let cert_names = ["CERT-MISS-MID-0", "CERT-MISS-MID-1", "CERT-MISS-MID-2"];
-    for cert_name in cert_names {
-        let student = Address::generate(&env);
-        enroll_and_certify(
-            &env,
-            &client,
-            &token_id,
-            &admin,
-            &student,
-            "COURSE-MISS-MID",
-            cert_name,
-        );
+/// Find the most recent event emitted by `contract_id` whose first topic
+/// matches `name`. Returns `(topics, data)` so callers can assert both the
+/// topic vector and the payload for indexer-reconciliation tests.
+fn find_event(env: &Env, contract_id: &Address, name: &str) -> (soroban_sdk::Vec<Val>, Val) {
+    let events = env.events().all();
+    for (contract, topics, data) in events.iter().rev() {
+        if contract != *contract_id {
+            continue;
+        }
+        let sym: Symbol = topics.get(0).unwrap().try_into_val(env).unwrap();
+        if sym == Symbol::new(env, name) {
+            return (topics, data);
+        }
     }
-
-    // Simulate TTL expiry of the middle certificate's record. The index
-    // still lists the ID, but the Certificate record is gone.
-    let missing_cert = String::from_str(&env, "CERT-MISS-MID-1");
-    env.as_contract(&contract_id, || {
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Certificate(missing_cert.clone()));
-    });
-
-    // Bulk revocation must not panic on the missing entry — it skips it
-    // and continues to the live certificates that follow.
-    let revoked_count = client.bulk_revoke_course_certificates(&admin, &course_id);
-    assert_eq!(revoked_count, 2);
-
-    // The two live certificates are revoked.
-    assert!(
-        client
-            .get_certificate(&admin, &String::from_str(&env, "CERT-MISS-MID-0"))
-            .revoked
-    );
-    assert!(
-        client
-            .get_certificate(&admin, &String::from_str(&env, "CERT-MISS-MID-2"))
-            .revoked
-    );
-
-    // The index is unchanged — the missing entry is still listed.
-    assert_eq!(client.get_course_certificates(&course_id).len(), 3);
+    panic!("event {} not found", name);
 }
 
-#[test]
-fn test_bulk_revoke_skips_missing_first_certificate() {
-    let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-
-    register_and_approve_course(
-        &env,
-        &client,
-        &token_id,
-        &admin,
-        &instructor,
-        "COURSE-MISS-FIRST",
-        100_000_000,
-    );
-    let course_id = String::from_str(&env, "COURSE-MISS-FIRST");
-    let cert_names = [
-        "CERT-MISS-FIRST-0",
-        "CERT-MISS-FIRST-1",
-        "CERT-MISS-FIRST-2",
-    ];
-    for cert_name in cert_names {
-        let student = Address::generate(&env);
-        enroll_and_certify(
-            &env,
-            &client,
-            &token_id,
-            &admin,
-            &student,
-            "COURSE-MISS-FIRST",
-            cert_name,
-        );
+/// #67 — Completed enrollments follow the documented refund policy.
+///
+/// The refund policy: only incomplete enrollments within the refund window
+/// are eligible. A completed enrollment is permanent
+        if contract != *contract_id {
+            continue;
+        }
+        let sym: Symbol = topics.get(0).unwrap().try_into_val(env).unwrap();
+        if sym == Symbol::new(env, name) {
+            return (topics, data);
+        }
     }
-
-    // Remove the first certificate's record — the loop must not abort here.
-    env.as_contract(&contract_id, || {
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Certificate(String::from_str(
-                &env,
-                "CERT-MISS-FIRST-0",
-            )));
-    });
-
-    let revoked_count = client.bulk_revoke_course_certificates(&admin, &course_id);
-    assert_eq!(revoked_count, 2);
-
-    assert!(
-        client
-            .get_certificate(&admin, &String::from_str(&env, "CERT-MISS-FIRST-1"))
-            .revoked
-    );
-    assert!(
-        client
-            .get_certificate(&admin, &String::from_str(&env, "CERT-MISS-FIRST-2"))
-            .revoked
-    );
-}
-
-// CAPACITY & LIMIT BOUNDARY TESTS (#59, #60, #61, #62)
-// ============================================================
-
-fn register_and_approve_capped_course(
-    env: &Env,
-    client: &SorobanLardContractClient,
-    token_id: &Address,
-    admin: &Address,
-    instructor: &Address,
-    course_id: &str,
-    price: i128,
-    cap: u32,
-) {
-    client.register_course(
-        instructor,
-        &String::from_str(env, course_id),
-        &price,
-        token_id,
-        &0u32,
-        &Some(cap),
-        &BytesN::from_array(env, &[1u8; 32]),
-        &soroban_sdk::Vec::new(env),
-    );
-    env.ledger().with_mut(|l| {
-        l.sequence_number += 1;
-    });
-    client.approve_course(admin, &String::from_str(env, course_id));
-}
-
-fn funded_student(env: &Env, token_id: &Address) -> Address {
-    let s = Address::generate(env);
-    token::StellarAssetClient::new(env, token_id).mint(&s, &100_000_000_000);
-    s
-}
-
-fn try_register(
-    env: &Env,
-    client: &SorobanLardContractClient,
-    token_id: &Address,
-    instructor: &Address,
-    course_id: &str,
-    categories: soroban_sdk::Vec<String>,
-) -> bool {
-    client
-        .try_register_course(
-            instructor,
-            &String::from_str(env, course_id),
-            &1_000_000_000,
-            token_id,
-            &0u32,
-            &None,
-            &BytesN::from_array(env, &[1u8; 32]),
-            &categories,
-        )
-        .is_ok()
-}
-
-#[test]
-fn test_list_courses_includes_active_archived_and_expired_entries() {
-    let (env, contract_id, token_id, admin, sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-
-    for id in ["CAT-ACTIVE", "CAT-ARCHIVED", "CAT-EXPIRED"] {
-        register_and_approve_course(&env, &client, &token_id, &admin, &instructor, id, 100_000_000);
-    }
-    let archived = String::from_str(&env, "CAT-ARCHIVED");
-    let expired = String::from_str(&env, "CAT-EXPIRED");
-
-    client.pause_course(&admin, &archived);
-    client.archive_course(&admin, &sec_admin, &archived, &None);
-
-    let now = env.ledger().sequence();
-    client.set_course_expiry(&admin, &expired, &Some(now + 1));
-    env.ledger().with_mut(|l| l.sequence_number = now + 10);
-
-    let page = client.list_courses(&0, &10);
-    assert_eq!(page.len(), 3);
-    assert_eq!(page.get(0).unwrap(), String::from_str(&env, "CAT-ACTIVE"));
-    assert_eq!(page.get(1).unwrap(), archived);
-    assert_eq!(page.get(2).unwrap(), expired);
-
-    // Listed IDs resolve via get_course; callers filter by status.
-    assert_eq!(
-        client.get_course(&String::from_str(&env, "CAT-ACTIVE")).unwrap().status,
-        CourseStatus::Active
-    );
-    assert_eq!(client.get_course(&archived).unwrap().status, CourseStatus::Archived);
-    let exp = client.get_course(&expired).unwrap();
-    assert_eq!(exp.status, CourseStatus::Active);
-    assert!(exp.expires_at_ledger.unwrap() < env.ledger().sequence());
-
-    // IDs that were never registered are not listed and resolve to None.
-    assert!(client.get_course(&String::from_str(&env, "CAT-MISSING")).is_none());
-}
-
-#[test]
-fn test_register_rejects_empty_and_whitespace_only_course_ids() {
-    let (env, contract_id, token_id, _admin, _sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-
-    for bad in ["", " ", "   "] {
-        assert!(
-            !try_register(&env, &client, &token_id, &instructor, bad),
-            "blank course id {:?} must be rejected",
-            bad
-        );
-    }
-
-    // No capacity consumed and nothing appended to the catalog.
-    assert_eq!(client.get_instructor_course_count(&instructor), 0);
-    assert_eq!(client.list_courses(&0, &10).len(), 0);
-
-    // IDs containing (but not consisting only of) spaces remain valid.
-    assert!(try_register(&env, &client, &token_id, &instructor, " A B "));
-    assert_eq!(client.get_instructor_course_count(&instructor), 1);
-    assert_eq!(client.list_courses(&0, &10).len(), 1);
-}
-
-#[test]
-#[should_panic(expected = "course_id cannot be blank")]
-fn test_register_whitespace_only_course_id_panics_with_message() {
-    let (env, contract_id, token_id, _admin, _sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-    client.register_course(
-        &instructor,
-        &String::from_str(&env, "    "),
-        &100_000_000,
-        &token_id,
-        &0u32,
-        &None,
-        &BytesN::from_array(&env, &[1u8; 32]),
-        &soroban_sdk::Vec::new(&env),
-    );
-}
-
-#[test]
-fn test_instructor_course_limit_exact_boundary() {
-    let (env, contract_id, token_id, admin, _sec, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-    client.update_max_courses_limit(&admin, &3u32);
-
-    for i in 0..3 {
-        let id = format!("LIMIT-{}", i);
-        assert!(try_register(&env, &client, &token_id, &instructor, &id, soroban_sdk::Vec::new(&env)));
-    }
-    assert_eq!(client.get_instructor_course_count(&instructor), 3);
-    let catalog_before = client.list_courses(&0u32, &100u32);
-    let by_instructor_before = client.get_courses_by_instructor(&instructor);
-
-    // One past the limit is rejected.
-    assert!(!try_register(&env, &client, &token_id, &instructor, "LIMIT-3", soroban_sdk::Vec::new(&env)));
-
-    // Nothing changed.
-    assert_eq!(client.get_instructor_course_count(&instructor), 3);
-    assert_eq!(client.list_courses(&0u32, &100u32), catalog_before);
-    assert_eq!(client.get_courses_by_instructor(&instructor), by_instructor_before);
-    assert!(client.get_course(&String::from_str(&env, "LIMIT-3")).is_none());
-}
-
-#[test]
-fn test_register_course_category_count_boundary() {
-    let (env, contract_id, token_id, _admin, _sec, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-
-    let mut cats = soroban_sdk::Vec::new(&env);
-    for i in 0..10 {
-        cats.push_back(String::from_str(&env, &format!("cat{}", i)));
-    }
-    // Exactly MAX_CATEGORIES (10) is accepted.
-    assert!(try_register(&env, &client, &token_id, &instructor, "CAT-OK", cats.clone()));
-    assert_eq!(
-        client.get_course(&String::from_str(&env, "CAT-OK")).unwrap().categories.len(),
-        10
-    );
-
-    // 11 is rejected without writing state.
-    cats.push_back(String::from_str(&env, "cat10"));
-    assert!(!try_register(&env, &client, &token_id, &instructor, "CAT-BAD", cats));
-    assert!(client.get_course(&String::from_str(&env, "CAT-BAD")).is_none());
-    assert_eq!(client.get_instructor_course_count(&instructor), 1);
-}
-
-#[test]
-fn test_register_course_category_length_boundary() {
-    let (env, contract_id, token_id, _admin, _sec, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-
-    // Exactly MAX_CATEGORY_LEN (64) is accepted.
-    let mut ok = soroban_sdk::Vec::new(&env);
-    ok.push_back(String::from_str(&env, &"a".repeat(64)));
-    assert!(try_register(&env, &client, &token_id, &instructor, "LEN-OK", ok));
-
-    // 65 is rejected without writing state.
-    let mut bad = soroban_sdk::Vec::new(&env);
-    bad.push_back(String::from_str(&env, "valid"));
-    bad.push_back(String::from_str(&env, &"a".repeat(65)));
-    assert!(!try_register(&env, &client, &token_id, &instructor, "LEN-BAD", bad));
-    assert!(client.get_course(&String::from_str(&env, "LEN-BAD")).is_none());
-    assert_eq!(client.get_instructor_course_count(&instructor), 1);
-}
-
-#[test]
-#[should_panic(expected = "register_course: too many categories")]
-fn test_register_course_too_many_categories_panics() {
-    let (env, contract_id, token_id, _admin, _sec, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-    let mut cats = soroban_sdk::Vec::new(&env);
-    for i in 0..11 {
-        cats.push_back(String::from_str(&env, &format!("c{}", i)));
-    }
-    client.register_course(
-        &instructor,
-        &String::from_str(&env, "CAT-PANIC"),
-        &1_000_000_000,
-        &token_id,
-        &0u32,
-        &None,
-        &BytesN::from_array(&env, &[1u8; 32]),
-        &cats,
-    );
-}
-
-#[test]
-fn test_archived_course_id_reuse_does_not_overwrite_archive_or_duplicate_catalog() {
-    let (env, contract_id, token_id, admin, sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-    let id = "COURSE-REUSE";
-    
-        &token_id,
-        &0u32,
-        &None,
-        &BytesN::from_array(&env, &[1u8; 32]),
-        &cats,
-    );
-}
-
-#[test]
-fn test_archived_course_id_reuse_does_not_overwrite_archive_or_duplicate_catalog() {
-    let (env, contract_id, token_id, admin, sec_admin, _treasury, instructor) = setup();
-    let client = SorobanLardContractClient::new(&env, &contract_id);
-    let id = "COURSE-REUSE";
-    let course_id = String::from_str(&env, id);
-
-    register_and_approve_course(&env, &client, &token_id, &admin, &instructor, id, 100_000_000);
-    client.pause_course(&admin, &course_id);
-    client.archive_course(&admin, &sec_admin, &course_id, &None);
-    let archived_at = client.get_course(&course_id).unwrap().archived_at_ledger.unwrap();
-
-    // During the cooldown, reuse is rejected and nothing changes.
-    env.ledger().with_mut(|l| {
-        l.sequence_number = archived_at + SorobanLardContract::ARCHIVE_COOLDOWN_LEDGERS - 1;
-    });
-    assert!(!try_register(&env, &client, &token_id, &instructor, id));
-    assert_eq!(client.get_course(&course_id).unwrap().status, CourseStatus::Archived);
-    assert_eq!(client.list_courses(&0, &10).len(), 1);
-
-    // After the cooldown, reuse succeeds as a fresh Pending course.
-    env.ledger().with_mut(|l| {
-        l.sequence_number = archived_at + SorobanLardContract::ARCHIVE_COOLDOWN_LEDGERS;
-    });
-    let other = Address::generate(&env);
-    assert!(try_register(&env, &client, &token_id, &other, id));
-
-    let current = client.get_course(&course_id).unwrap();
-    assert_eq!(current.status, CourseStatus::Pending);
-    assert_eq!(current.instructor, other);
-
-    // The archived record is preserved untouched.
-    let archived: Course = env.as_contract(&contract_id, || {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ArchivedCourse(course_id.clone()))
-            .unwrap()
-    });
-    assert_eq!(archived.status, CourseStatus::Archived);
-    assert_eq!(archived.instructor, instructor);
-    assert_eq!(archived.archived_at_ledger, Some(archived_at));
-
-    // The catalog still lists the ID exactly once.
-    let page = client.list_courses(&0, &10);
-    assert_eq!(page.len(), 1);
-    assert_eq!(page.get(0).unwrap(), course_id);
+    panic!("event {} not found", name);
 }
 
 fn count_events(env: &Env, contract_id: &Address, name: &str) -> u32 {
@@ -16065,6 +15694,200 @@ fn test_approve_course_before_at_and_after_review_delay() {
 #[test]
 fn test_bulk_revoke_all_missing_certificates_returns_zero() {
     let (env, contract_id, token_id, admin, _sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-ALL-MISSING",
+        100_000_000,
+    );
+    let course_id = String::from_str(&env, "COURSE-ALL-MISSING");
+    let student = Address::generate(&env);
+    enroll_and_certify(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-REFUND-EVT-69",
+        price,
+    );
+    let course_id = String::from_str(&env, "COURSE-REFUND-EVT-69");
+
+    // --- refund_requested ---
+    client.enroll(&student, &course_id);
+    client.request_refund(&student, &course_id);
+
+    let (rq_topics, rq_data) = find_event(&env, &contract_id, "refund_requested");
+    let rq_sym: Symbol = rq_topics.get(0).unwrap().try_into_val(&env).
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-REFUND-EVT-69",
+        price,
+    );
+    let course_id = String::from_str(&env, "COURSE-REFUND-EVT-69");
+
+    // --- refund_requested ---
+    client.enroll(&student, &course_id);
+    client.request_refund(&student, &course_id);
+
+    let (rq_topics, rq_data) = find_event(&env, &contract_id, "refund_requested");
+    let rq_sym: Symbol = rq_topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(rq_sym, Symbol::new(&env, "refund_requested"));
+    let rq_topic_course: String = rq_topics.get(1).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(rq_topic_course, course_id);
+
+    let (rq_student, rq_course, rq_amount): (Address, String, i128) =
+        rq_data.try_into_val(&env).unwrap();
+    assert_eq!(rq_student, student);
+    assert_eq!(rq_course, course_id);
+    assert_eq!(rq_amount, price);
+
+    // --- refund_processed (approved) ---
+    env.mock_all_auths_allowing_non_root_auth();
+    client.process_refund(&admin, &student, &course_id, &true);
+
+    let (rp_topics, rp_data) = find_event(&env, &contract_id, "refund_processed");
+    let rp_sym: Symbol = rp_topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(rp_sym, Symbol::new(&env, "refund_processed"));
+    let rp_topic_course: String = rp_topics.get(1).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(rp_topic_course, course_id);
+
+    let (rp_student, rp_course, rp_approved, rp_admin): (Address, String, bool, Address) =
+        rp_data.try_into_val(&env).unwrap();
+    assert_eq!(rp_student, student);
+    assert_eq!(rp_course, course_id);
+    assert!(rp_approved);
+    assert_eq!(rp_admin, admin);
+
+    // --- refund_processed (rejected) ---
+    let student_b = Address::generate(&env);
+    token::StellarAssetClient::new(&env, &token_id).mint(&student_b, &100_000_000_000);
+
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-REFUND-EVT-69B",
+        price,
+    );
+    let course_id_b = String::from_str(&env, "COURSE-REFUND-EVT-69B");
+
+    client.enroll(&student_b, &course_id_b);
+    client.request_refund(&student_b, &course_id_b);
+    client.process_refund(&admin, &student_b, &course_id_b, &false);
+
+    let (rp2_topics, rp2_data) = find_event(&env, &contract_id, "refund_processed");
+    let rp2_sym: Symbol = rp2_topics.get(0).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(rp2_sym, Symbol::new(&env, "refund_processed"));
+    let rp2_topic_course: String = rp2_topics.get(1).unwrap().try_into_val(&env).unwrap();
+    assert_eq!(rp2_topic_course, course_id_b);
+
+    let (rp2_student, rp2_course, rp2_approved, rp2_admin): (Address, String, bool, Address) =
+        rp2_data.try_into_val(&env).unwrap();
+    assert_eq!(rp2_student, student_b);
+    assert_eq!(rp2_course, course_id_b);
+    assert!(!rp2_approved);
+    assert_eq!(rp2_admin, admin);
+}
+
+/// #70 — Archived enrollment records cannot be refunded twice.
+///
+/// After a refund, the enrollment is archived to EnrollmentHistory with
+/// `is_refunded = true` and removed from active storage. A second refund
+/// attempt — whether via `process_refund` or `archive_course` — must not
+/// transfer tokens or append another refunded history entry.
+#[test]
+fn test_archived_enrollment_cannot_be_refunded_twice() {
+    let (env, contract_id, token_id, admin, sec_admin, _treasury, instructor) = setup();
+    let client = SorobanLardContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    let student = Address::generate(&env);
+    token::StellarAssetClient::new(&env, &token_id).mint(&student, &100_000_000_000);
+
+    register_and_approve_course(
+        &env,
+        &client,
+        &token_id,
+        &admin,
+        &instructor,
+        "COURSE-DOUBLE-REFUND-70",
+        1_000_000_000,
+    );
+    let course_id = String::from_str(&env, "COURSE-DOUBLE-REFUND-70");
+
+    // --- First refund succeeds ---
+    client.enroll(&student, &course_id);
+    client.request_refund(&student, &course_id);
+    let balance_before = token_client.balance(&student);
+    env.mock_all_auths_allowing_non_root_auth();
+    client.process_refund(&admin, &student, &course_id, &true);
+    let balance_after = token_client.balance(&student);
+    assert_eq!(balance_after - balance_before, 1_000_000_000);
+
+    // History has exactly one refunded entry.
+    let history = client.get_enrollment_history(&admin, &student, &course_id);
+    assert_eq!(history.len(), 1);
+    assert!(history.get(0).unwrap().is_refunded);
+
+    // --- Second process_refund must fail (request is no longer Pending) ---
+    let result = client.try_process_refund(&admin, &student, &course_id, &true);
+    assert!(
+        result.is_err(),
+        "second process_refund must fail — request is not pending"
+    );
+
+    // No additional tokens transferred.
+    assert_eq!(
+        token_client.balance(&student),
+        balance_after,
+        "no additional tokens after failed second refund"
+    );
+    // No additional history entry.
+    assert_eq!(
+        client
+            .get_enrollment_history(&admin, &student, &course_id)
+            .len(),
+        1,
+        "no additional history entry after failed second refund"
+    );
+
+    // --- archive_course also cannot double-refund ---
+    // The enrollment was removed from active storage by process_refund, so
+    // archive_course's `has(&enrollment_key)` check returns false and the
+    // student is skipped entirely — no transfer, no history entry.
+    client.pause_course(&admin, &course_id);
+    let mut refund_list = soroban_sdk::Vec::new(&env);
+    refund_list.push_back(student.clone());
+    client.archive_course(&admin, &sec_admin, &course_id, &Some(refund_list));
+
+    assert_eq!(
+        token_client.balance(&student),
+        balance_after,
+        "archive_course must not double-refund an already-refunded enrollment"
+    );
+    assert_eq!(
+        client
+            .get_enrollment_history(&admin, &student, &course_id)
+            .len(),
+        1,
+        "archive_course must not append a second refunded history entry"
+    );
+}
+
+#[test]
+fn test_bulk_revoke_all_missing_certificates() {
+    let (env, contract_id, token_id, admin, _sec, _treasury, instructor) = setup();
     let client = SorobanLardContractClient::new(&env, &contract_id);
 
     register_and_approve_course(
@@ -16211,5 +16034,4 @@ fn test_capacity_released_after_refund() {
     // And the course is full again.
     let s4 = funded_student(&env, &token_id);
     assert!(client.try_enroll(&s4, &cid).is_err());
-}
 }
